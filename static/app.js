@@ -1,445 +1,288 @@
-document.addEventListener("DOMContentLoaded", () => {
-    // 1. Tab Navigation
-    const tabBtns = document.querySelectorAll(".tab-btn");
-    const socViews = document.querySelectorAll(".soc-view");
-
-    tabBtns.forEach(btn => {
-        btn.addEventListener("click", () => {
-            const targetId = btn.getAttribute("data-target");
-            tabBtns.forEach(b => b.classList.remove("active"));
-            socViews.forEach(v => v.classList.remove("active"));
-
-            btn.classList.add("active");
-            document.getElementById(targetId).classList.add("active");
-
-            if (targetId === "sec-explorer") {
-                loadDatasetSamples(false);
-            }
-        });
-    });
-
-    // 2. Character Counter
-    const promptInput = document.getElementById("prompt-input");
-    const charCount = document.getElementById("char-count");
-
-    if (promptInput && charCount) {
-        promptInput.addEventListener("input", () => {
-            charCount.textContent = `${promptInput.value.length} characters`;
-        });
-    }
-
-    // 3. Key Config Persistence
-    const keyInput = document.getElementById("gemini-key-input");
-    const btnSaveKey = document.getElementById("btn-save-key");
-
-    const savedKey = localStorage.getItem("gemini_api_key") || "";
-    if (savedKey && keyInput) {
-        keyInput.value = savedKey;
-    }
-
-    if (btnSaveKey) {
-        btnSaveKey.addEventListener("click", () => {
-            const val = keyInput ? keyInput.value.trim() : "";
-            localStorage.setItem("gemini_api_key", val);
-            btnSaveKey.textContent = "SAVED!";
-            setTimeout(() => { btnSaveKey.textContent = "SAVE KEY"; }, 1500);
-        });
-    }
-
-    // 4. Preset Chips Click Handler
-    document.querySelectorAll(".chip").forEach(chip => {
-        chip.addEventListener("click", () => {
-            const text = chip.getAttribute("data-prompt");
-            if (promptInput && text) {
-                promptInput.value = text;
-                promptInput.focus();
-                if (charCount) charCount.textContent = `${text.length} characters`;
-            }
-        });
-    });
-
-    // 5. Initial Laya Info
-    fetchLayaInfo();
-
-    // 6. Execution Buttons (Laya vs Vector RAG)
-    const btnEvalLaya = document.getElementById("btn-eval-laya");
-    const btnExecLaya = document.getElementById("btn-exec-laya");
-    const btnEvalRag = document.getElementById("btn-eval-rag");
-    const btnExecRag = document.getElementById("btn-exec-rag");
-
-    if (btnEvalLaya) btnEvalLaya.addEventListener("click", () => runPipeline("laya", false));
-    if (btnExecLaya) btnExecLaya.addEventListener("click", () => runPipeline("laya", true));
-    if (btnEvalRag) btnEvalRag.addEventListener("click", () => runPipeline("rag", false));
-    if (btnExecRag) btnExecRag.addEventListener("click", () => runPipeline("rag", true));
-
-    // 7. Copy LLM Response Button
-    const btnCopy = document.getElementById("btn-copy-llm");
-    if (btnCopy) {
-        btnCopy.addEventListener("click", () => {
-            const llmText = document.getElementById("llm-output-text").textContent;
-            navigator.clipboard.writeText(llmText);
-            btnCopy.textContent = "COPIED!";
-            setTimeout(() => { btnCopy.textContent = "COPY RESPONSE"; }, 1500);
-        });
-    }
-
-    // 8. Side-by-Side Benchmark Button
-    const btnBench = document.getElementById("btn-run-benchmark");
-    if (btnBench) {
-        btnBench.addEventListener("click", runSideBySideBenchmark);
-    }
-
-    // 9. Dataset Search Filter & Refresh
-    const btnRefresh = document.getElementById("btn-refresh-samples");
-    const filterInput = document.getElementById("filter-samples-input");
-
-    if (btnRefresh) {
-        btnRefresh.addEventListener("click", () => loadDatasetSamples(true));
-    }
-    if (filterInput) {
-        filterInput.addEventListener("input", filterDatasetRows);
-    }
-});
-
+const $ = (id) => document.getElementById(id);
 let cachedDatasetSamples = [];
 
-async function fetchLayaInfo() {
-    try {
-        const res = await fetch("/api/laya/info");
-        if (!res.ok) return;
-        const data = await res.json();
-        console.log("Laya Model Info:", data);
-    } catch (e) {
-        console.error("Failed to fetch Laya info:", e);
-    }
+document.addEventListener("DOMContentLoaded", () => {
+    // Tabs
+    const tabBtns = document.querySelectorAll(".tab-btn");
+    const views = document.querySelectorAll(".view");
+    tabBtns.forEach(btn => {
+        btn.addEventListener("click", () => {
+            tabBtns.forEach(b => b.classList.remove("active"));
+            views.forEach(v => v.classList.remove("active"));
+            btn.classList.add("active");
+            $(btn.dataset.target).classList.add("active");
+            if (btn.dataset.target === "sec-explorer" && cachedDatasetSamples.length === 0) loadDatasetSamples(false);
+        });
+    });
+
+    // Theme toggle (system by default, remembered once chosen)
+    $("btn-theme").addEventListener("click", () => {
+        const root = document.documentElement;
+        const current = root.getAttribute("data-theme") ||
+            (window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light");
+        const next = current === "dark" ? "light" : "dark";
+        root.setAttribute("data-theme", next);
+        try { localStorage.setItem("laya_theme", next); } catch (e) {}
+    });
+
+    // Prompt input
+    const promptInput = $("prompt-input");
+    const updateCount = () => { $("char-count").textContent = `${promptInput.value.length} characters`; };
+    promptInput.addEventListener("input", updateCount);
+
+    document.querySelectorAll(".chip").forEach(chip => {
+        chip.addEventListener("click", () => {
+            promptInput.value = chip.dataset.prompt;
+            promptInput.focus();
+            updateCount();
+        });
+    });
+
+    // Engine selection shows the RAG latency note
+    document.querySelectorAll('input[name="engine"]').forEach(r => {
+        r.addEventListener("change", () => { $("rag-latency-notice").hidden = selectedEngine() !== "rag"; });
+    });
+
+    $("btn-run").addEventListener("click", runPipeline);
+    promptInput.addEventListener("keydown", (e) => {
+        if ((e.ctrlKey || e.metaKey) && e.key === "Enter") runPipeline();
+    });
+
+    $("btn-copy-llm").addEventListener("click", async () => {
+        const btn = $("btn-copy-llm");
+        try { await navigator.clipboard.writeText($("llm-output-text").textContent); btn.textContent = "Copied"; }
+        catch (e) { btn.textContent = "Copy failed"; }
+        setTimeout(() => { btn.textContent = "Copy"; }, 1500);
+    });
+
+    $("btn-run-benchmark").addEventListener("click", runSideBySideBenchmark);
+    $("bench-input").addEventListener("keydown", (e) => { if (e.key === "Enter") runSideBySideBenchmark(); });
+
+    $("btn-refresh-samples").addEventListener("click", () => loadDatasetSamples(true));
+    $("filter-samples-input").addEventListener("input", filterDatasetRows);
+});
+
+function selectedEngine() {
+    const checked = document.querySelector('input[name="engine"]:checked');
+    return checked ? checked.value : "laya";
 }
 
-async function runPipeline(engineType = "laya", executeLlm = true) {
-    const promptInput = document.getElementById("prompt-input");
-    const promptText = promptInput ? promptInput.value.trim() : "";
+function showError(id, message) {
+    const el = $(id);
+    el.textContent = message || "";
+    el.hidden = !message;
+}
 
+function setBadge(el, state, text) {
+    el.className = "badge" + (state ? ` ${state}` : "");
+    el.textContent = text;
+}
+
+function fmtMs(n) {
+    const v = Number(n) || 0;
+    return v >= 1000 ? `${(v / 1000).toFixed(2)} s` : `${v.toFixed(v < 100 ? 1 : 0)} ms`;
+}
+
+async function postJson(url, body) {
+    const res = await fetch(url, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+    });
+    if (!res.ok) {
+        let detail = `Request failed (${res.status})`;
+        try { detail = (await res.json()).detail || detail; } catch (e) {}
+        throw new Error(detail);
+    }
+    return res.json();
+}
+
+async function runPipeline() {
+    const promptText = $("prompt-input").value.trim();
+    showError("form-error", "");
     if (!promptText) {
-        alert("Please enter a prompt to evaluate.");
+        showError("form-error", "Enter a prompt to check.");
         return;
     }
 
-    const keyInput = document.getElementById("gemini-key-input");
-    const geminiKey = (keyInput ? keyInput.value.trim() : "") || localStorage.getItem("gemini_api_key") || "";
+    const engine = selectedEngine();
+    const withLlm = $("toggle-llm").checked;
+    const endpoint = `/api/${engine}/${withLlm ? "query" : "evaluate"}`;
+    const engineName = engine === "laya" ? "Laya" : "Vector RAG";
 
-    const engineName = engineType === "laya" ? "Laya System 1" : "Vector RAG Guardrail";
-    const endpoint = engineType === "laya" 
-        ? (executeLlm ? "/api/laya/query" : "/api/laya/evaluate")
-        : (executeLlm ? "/api/rag/query" : "/api/rag/evaluate");
+    const btn = $("btn-run");
+    btn.disabled = true;
+    btn.textContent = "Running";
 
-    const noticeBox = document.getElementById("rag-latency-notice");
-    if (noticeBox) {
-        noticeBox.style.display = engineType === "rag" ? "block" : "none";
-    }
-
-    // Show Timing Banner & Findings
-    document.getElementById("timing-banner").style.display = "flex";
-    document.getElementById("findings-section").style.display = "grid";
-
-    // Set Card Titles based on engineType
-    const titleVerdict = document.getElementById("title-verdict-card");
-    const titleInspector = document.getElementById("title-inspector-card");
-    const hintInspector = document.getElementById("hint-inspector-card");
-    const titleLlm = document.getElementById("title-llm-card");
-
-    const jsonBox = document.getElementById("laya-json-output");
-    const ragBox = document.getElementById("rag-chunks-output");
-
-    if (engineType === "laya") {
-        if (titleVerdict) titleVerdict.textContent = "⚡ LAYA SYSTEM 1 VERDICT";
-        if (titleInspector) titleInspector.textContent = "⚡ LAYA STRUCTURED DECISION OUTPUT";
-        if (hintInspector) hintInspector.textContent = "Typed Primitives (Choice/Noul)";
-        if (titleLlm) titleLlm.textContent = "GEMINI LLM OUTPUT CONSOLE (POST-LAYA AUDIT)";
-
-        if (jsonBox) jsonBox.style.display = "block";
-        if (ragBox) ragBox.style.display = "none";
-    } else {
-        if (titleVerdict) titleVerdict.textContent = "🔍 VECTOR RAG SECURITY VERDICT";
-        if (titleInspector) titleInspector.textContent = "🔍 VECTOR RAG RETRIEVED SIMILAR CHUNKS / PROMPTS";
-        if (hintInspector) hintInspector.textContent = "Top Vector Cosine Similarity Matches (hlyn-labs dataset)";
-        if (titleLlm) titleLlm.textContent = "GEMINI LLM OUTPUT CONSOLE (POST-VECTOR RAG AUDIT)";
-
-        if (jsonBox) jsonBox.style.display = "none";
-        if (ragBox) {
-            ragBox.style.display = "flex";
-            ragBox.innerHTML = `<div class="explanation-callout" style="color: var(--accent-cyan); border-left-color: var(--accent-cyan);">⏳ Retrieval In Progress: Searching Vector Database index for cosine similarity matches... (2.0s overhead)</div>`;
-        }
-    }
-
-    document.getElementById("lbl-guardrail-time").textContent = `${engineName.toUpperCase()} TIME:`;
-    document.getElementById("val-laya-time").textContent = "...";
-    document.getElementById("val-llm-time").textContent = "...";
-    document.getElementById("val-total-time").textContent = "...";
-
-    document.getElementById("badge-verdict").className = "verdict-tag";
-    document.getElementById("badge-verdict").textContent = "[PROCESSING...]";
-    document.getElementById("box-explanation").textContent = `${engineName} audit pass in progress... (${engineType === 'rag' ? '2.0s Vector Index Overhead' : 'Sub-35ms Single Forward Pass'})`;
-    if (jsonBox) jsonBox.textContent = "Evaluating prompt...";
-    document.getElementById("llm-output-text").textContent = executeLlm ? "⏳ Executing Gemini LLM query..." : `ℹ️ [${engineName} Check Only]: Gemini LLM call bypassed.`;
+    $("timing-banner").hidden = false;
+    $("findings-section").hidden = false;
+    $("lbl-guardrail-time").textContent = engineName;
+    ["val-laya-time", "val-llm-time", "val-total-time"].forEach(id => { $(id).textContent = "..."; });
+    setBadge($("badge-verdict"), "", "Running");
+    $("box-explanation").textContent = `${engineName} is evaluating the prompt.`;
+    $("llm-output-text").textContent = withLlm ? "Waiting for Gemini." : "Gemini was skipped for this check.";
 
     try {
-        const res = await fetch(endpoint, {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ prompt: promptText, gemini_api_key: geminiKey })
-        });
-
-        if (!res.ok) {
-            const err = await res.json();
-            alert(`Error: ${err.detail || 'Evaluation failed'}`);
-            return;
-        }
-
-        const data = await res.json();
-        renderPipelineResults(engineType, data, executeLlm);
+        const data = await postJson(endpoint, { prompt: promptText });
+        renderPipelineResults(engine, data, withLlm);
     } catch (e) {
-        console.error("Pipeline error:", e);
-        alert(`Failed to connect to ${engineName} server.`);
+        showError("form-error", e.message || `Could not reach the ${engineName} server.`);
+        $("timing-banner").hidden = true;
+        $("findings-section").hidden = true;
+    } finally {
+        btn.disabled = false;
+        btn.textContent = "Run check";
     }
 }
 
-function renderPipelineResults(engineType, data, executeLlm) {
-    const evalData = data.laya_evaluation || data.guardrail_evaluation || data;
-    const isSafe = evalData.is_safe;
-    const riskPercentage = evalData.risk_percentage !== undefined ? evalData.risk_percentage : (evalData.risk_score * 100).toFixed(1);
-    
-    const timings = data.timings || {
-        laya_guardrail_time_ms: evalData.laya_execution_time_ms || 0.0,
-        rag_guardrail_time_ms: evalData.rag_execution_time_ms || 0.0,
-        gemini_llm_time_ms: 0.0,
-        total_pipeline_time_ms: evalData.laya_execution_time_ms || evalData.rag_execution_time_ms || 0.0
-    };
+function renderPipelineResults(engine, data, withLlm) {
+    const ev = data.laya_evaluation || data.guardrail_evaluation || data;
+    const isSafe = ev.is_safe;
+    const riskPct = ev.risk_percentage !== undefined ? Number(ev.risk_percentage) : Number(ev.risk_score) * 100;
+    const engineName = engine === "laya" ? "Laya" : "Vector RAG";
 
-    const guardrailMs = timings.laya_guardrail_time_ms || timings.rag_guardrail_time_ms || evalData.laya_execution_time_ms || evalData.rag_execution_time_ms || 0.0;
-    const llmMs = timings.gemini_llm_time_ms || 0.0;
-    const totalMs = timings.total_pipeline_time_ms || (guardrailMs + llmMs);
+    const t = data.timings || {};
+    const guardrailMs = t.laya_guardrail_time_ms || t.rag_guardrail_time_ms || ev.laya_execution_time_ms || ev.rag_execution_time_ms || 0;
+    const llmMs = t.gemini_llm_time_ms || 0;
+    const totalMs = t.total_pipeline_time_ms || guardrailMs + llmMs;
 
-    const engineName = engineType === "laya" ? "LAYA SYSTEM 1" : "VECTOR RAG";
+    // Titles
+    $("title-verdict-card").textContent = `${engineName} verdict`;
+    $("title-inspector-card").textContent = engine === "laya" ? "Laya decisions" : "Closest known prompts";
+    $("hint-inspector-card").textContent = engine === "laya" ? "Typed output" : "Cosine similarity";
 
-    // Update Titles
-    const titleVerdict = document.getElementById("title-verdict-card");
-    const titleInspector = document.getElementById("title-inspector-card");
-    const hintInspector = document.getElementById("hint-inspector-card");
-    const titleLlm = document.getElementById("title-llm-card");
+    // Timings
+    $("lbl-guardrail-time").textContent = engineName;
+    $("val-laya-time").textContent = fmtMs(guardrailMs);
+    $("val-llm-time").textContent = withLlm ? fmtMs(llmMs) : "skipped";
+    $("val-total-time").textContent = fmtMs(totalMs);
 
-    if (engineType === "laya") {
-        if (titleVerdict) titleVerdict.textContent = "⚡ LAYA SYSTEM 1 VERDICT";
-        if (titleInspector) titleInspector.textContent = "⚡ LAYA STRUCTURED DECISION OUTPUT";
-        if (hintInspector) hintInspector.textContent = "Typed Primitives (Choice/Noul)";
-        if (titleLlm) titleLlm.textContent = "GEMINI LLM OUTPUT CONSOLE (POST-LAYA AUDIT)";
-    } else {
-        if (titleVerdict) titleVerdict.textContent = "🔍 VECTOR RAG SECURITY VERDICT";
-        if (titleInspector) titleInspector.textContent = "🔍 VECTOR RAG RETRIEVED SIMILAR CHUNKS / PROMPTS";
-        if (hintInspector) hintInspector.textContent = "Top Vector Cosine Similarity Matches (hlyn-labs dataset)";
-        if (titleLlm) titleLlm.textContent = "GEMINI LLM OUTPUT CONSOLE (POST-VECTOR RAG AUDIT)";
-    }
-
-    // Render Timings Banner
-    document.getElementById("lbl-guardrail-time").textContent = `${engineName} TIME:`;
-    document.getElementById("val-laya-time").textContent = `${guardrailMs} ms`;
-    document.getElementById("val-llm-time").textContent = `${llmMs} ms`;
-    document.getElementById("val-total-time").textContent = `${totalMs} ms`;
-
-    // Render Verdict Badge
-    const badge = document.getElementById("badge-verdict");
-    if (isSafe) {
-        badge.className = "verdict-tag verdict-passed";
-        badge.textContent = `[PASSED - AUTHENTIC] (${engineName})`;
-    } else {
-        badge.className = "verdict-tag verdict-blocked";
-        badge.textContent = `[BLOCKED - PROMPT INJECTION] (${engineName})`;
-    }
-
-    // Render Risk Bar
-    const fill = document.getElementById("risk-bar-fill");
-    fill.style.width = `${Math.min(100, Math.max(0, riskPercentage))}%`;
+    // Verdict + risk
+    setBadge($("badge-verdict"), isSafe ? "passed" : "blocked", isSafe ? "Passed" : "Blocked");
+    const fill = $("risk-bar-fill");
+    fill.style.width = `${Math.min(100, Math.max(0, riskPct))}%`;
     fill.style.backgroundColor = isSafe ? "var(--success)" : "var(--danger)";
-    document.getElementById("txt-risk-score").textContent = `${riskPercentage}%`;
+    $("txt-risk-score").textContent = `${riskPct.toFixed(1)}%`;
+    $("risk-tick").hidden = engine !== "laya";
+    $("box-explanation").textContent = ev.explanation || `Verdict: ${ev.verdict} (risk ${riskPct.toFixed(1)}%).`;
 
-    // Render Explanation Callout
-    const boxExp = document.getElementById("box-explanation");
-    boxExp.textContent = evalData.explanation || `Verdict: ${evalData.verdict} (Risk Score: ${riskPercentage}%).`;
-    boxExp.style.borderLeftColor = isSafe ? "var(--success)" : "var(--danger)";
+    // Inspector
+    const jsonBox = $("laya-json-output");
+    const ragBox = $("rag-chunks-output");
+    jsonBox.hidden = engine !== "laya";
+    ragBox.hidden = engine === "laya";
 
-    // Render Inspector Box: Laya JSON vs RAG Similar Chunks
-    const jsonBox = document.getElementById("laya-json-output");
-    const ragBox = document.getElementById("rag-chunks-output");
-
-    if (engineType === "laya") {
-        if (jsonBox) jsonBox.style.display = "block";
-        if (ragBox) ragBox.style.display = "none";
-
-        if (jsonBox) {
-            jsonBox.textContent = JSON.stringify({
-                engine: "LAYA SYSTEM 1",
-                guardrail_latency_ms: `${guardrailMs} ms`,
-                gemini_llm_latency_ms: `${llmMs} ms`,
-                total_pipeline_latency_ms: `${totalMs} ms`,
-                verdict: evalData.verdict,
-                risk_score: evalData.risk_score,
-                risk_percentage: `${riskPercentage}%`,
-                decisions: evalData.laya_decisions || {
-                    is_attack: isSafe ? "No" : "Yes",
-                    threat_category: isSafe ? "benign_query" : "prompt_injection"
-                }
-            }, null, 2);
-        }
+    if (engine === "laya") {
+        jsonBox.textContent = JSON.stringify({
+            verdict: ev.verdict,
+            risk_score: ev.risk_score,
+            decisions: ev.laya_decisions || {
+                is_injection_attack: !isSafe,
+                threat_category: isSafe ? "benign_query" : "prompt_injection",
+            },
+        }, null, 2);
     } else {
-        if (jsonBox) jsonBox.style.display = "none";
-        if (ragBox) ragBox.style.display = "flex";
-
-        const matches = evalData.top_matches || [];
-        if (ragBox) {
-            if (matches.length === 0) {
-                ragBox.innerHTML = `<div class="explanation-callout">No historical vector matches found.</div>`;
-            } else {
-                ragBox.innerHTML = matches.map((m, idx) => {
-                    const isAttack = m.label === 1 || m.label_name === "PROMPT_INJECTION";
-                    const badgeClass = isAttack ? "chip-attack" : "chip-safe";
-                    const labelTitle = isAttack ? "[PROMPT_INJECTION]" : "[BENIGN_QUERY]";
-                    const simPct = m.similarity !== undefined ? (m.similarity * 100).toFixed(1) : "N/A";
-                    return `
-                        <div class="chunk-card ${isAttack ? 'chunk-attack' : 'chunk-safe'}">
-                            <div class="chunk-meta">
-                                <span class="chip-badge ${badgeClass}">${labelTitle}</span>
-                                <span class="chunk-similarity">Rank #${idx + 1} | ${simPct}% Vector Similarity</span>
-                            </div>
-                            <div class="chunk-text">"${escapeHtml(m.text)}"</div>
+        const matches = ev.top_matches || [];
+        ragBox.innerHTML = matches.length === 0
+            ? `<p class="muted">No similar prompts found.</p>`
+            : matches.map((m, i) => {
+                const attack = m.label === 1 || m.label_name === "PROMPT_INJECTION";
+                const sim = m.similarity !== undefined ? `${(m.similarity * 100).toFixed(1)}%` : "n/a";
+                return `
+                    <div class="match">
+                        <div class="match-meta">
+                            <span class="badge ${attack ? "blocked" : "passed"}">${attack ? "Injection" : "Benign"}</span>
+                            <span class="mono">#${i + 1} &middot; ${sim}</span>
                         </div>
-                    `;
-                }).join("");
-            }
-        }
+                        <div class="match-text">${escapeHtml(m.text)}</div>
+                    </div>`;
+            }).join("");
     }
 
-    // Render Gemini LLM Console
-    const llmOut = document.getElementById("llm-output-text");
-    const modelBadge = document.getElementById("badge-model");
-
-    if (executeLlm) {
-        if (data.llm_model) {
-            modelBadge.textContent = `MODEL: ${data.llm_model}`;
-        }
-        llmOut.textContent = data.llm_response || "No response received.";
+    // Gemini output
+    $("title-llm-card").textContent = "Gemini response";
+    if (withLlm) {
+        $("badge-model").textContent = data.llm_model || "";
+        $("llm-output-text").textContent = data.llm_response || "No response received.";
     } else {
-        llmOut.textContent = `ℹ️ [${engineName} Inspection Only]: Guardrail evaluated prompt in ${guardrailMs}ms. Gemini LLM call bypassed.`;
+        $("badge-model").textContent = "";
+        $("llm-output-text").textContent = `Gemini was skipped. ${engineName} decided in ${fmtMs(guardrailMs)}.`;
     }
 }
 
 async function runSideBySideBenchmark() {
-    const input = document.getElementById("bench-input");
-    const promptText = input ? input.value.trim() : "";
-
+    const promptText = $("bench-input").value.trim();
+    showError("bench-error", "");
     if (!promptText) {
-        alert("Please enter a prompt to benchmark.");
+        showError("bench-error", "Enter a prompt to compare.");
         return;
     }
 
-    const grid = document.getElementById("bench-results-grid");
-    grid.style.display = "grid";
-
-    document.getElementById("bench-laya-ms").textContent = "...";
-    document.getElementById("bench-rag-ms").textContent = "...";
-    document.getElementById("bench-laya-verdict").textContent = "RUNNING";
-    document.getElementById("bench-rag-verdict").textContent = "RUNNING";
-    document.getElementById("bench-summary-box").textContent = "Executing side-by-side latency benchmark...";
+    const btn = $("btn-run-benchmark");
+    btn.disabled = true;
+    btn.textContent = "Running";
+    $("bench-results-grid").hidden = false;
+    ["bench-laya-ms", "bench-rag-ms"].forEach(id => { $(id).textContent = "..."; });
+    setBadge($("bench-laya-verdict"), "", "Running");
+    setBadge($("bench-rag-verdict"), "", "Running");
+    $("bench-laya-bar").style.width = "0";
+    $("bench-rag-bar").style.width = "0";
+    $("bench-summary-box").textContent = "Running both guardrails.";
 
     try {
-        const res = await fetch("/api/compare", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ prompt: promptText })
-        });
-
-        if (!res.ok) {
-            alert("Benchmark request failed.");
-            return;
-        }
-
-        const data = await res.json();
-        
-        // Laya Card
-        document.getElementById("bench-laya-ms").textContent = data.laya.latency_ms;
-        const bLayaTag = document.getElementById("bench-laya-verdict");
-        bLayaTag.className = data.laya.verdict === "SAFE" ? "verdict-tag verdict-passed" : "verdict-tag verdict-blocked";
-        bLayaTag.textContent = data.laya.verdict;
-
-        // RAG Card
-        document.getElementById("bench-rag-ms").textContent = data.rag.latency_ms;
-        const bRagTag = document.getElementById("bench-rag-verdict");
-        bRagTag.className = data.rag.verdict === "SAFE" ? "verdict-tag verdict-passed" : "verdict-tag verdict-blocked";
-        bRagTag.textContent = data.rag.verdict;
-
-        // Summary Box
-        document.getElementById("bench-summary-box").innerHTML = `
-            🚀 <strong>BENCHMARK RESULT:</strong> ${data.benchmark.speedup_factor}<br>
-            <span style="font-size: 0.85rem; color: var(--text-muted);">
-            Laya Latency: <strong>${data.laya.latency_ms} ms</strong> vs Vector RAG Latency: <strong>${data.rag.latency_ms} ms</strong>
-            </span>
-        `;
+        const data = await postJson("/api/compare", { prompt: promptText });
+        const l = data.laya, r = data.rag;
+        $("bench-laya-ms").textContent = Number(l.latency_ms).toFixed(1);
+        $("bench-rag-ms").textContent = Number(r.latency_ms).toFixed(1);
+        setBadge($("bench-laya-verdict"), l.verdict === "SAFE" ? "passed" : "blocked", l.verdict === "SAFE" ? "Passed" : "Blocked");
+        setBadge($("bench-rag-verdict"), r.verdict === "SAFE" ? "passed" : "blocked", r.verdict === "SAFE" ? "Passed" : "Blocked");
+        const max = Math.max(l.latency_ms, r.latency_ms, 1);
+        $("bench-laya-bar").style.width = `${Math.max(2, (l.latency_ms / max) * 100)}%`;
+        $("bench-rag-bar").style.width = `${Math.max(2, (r.latency_ms / max) * 100)}%`;
+        $("bench-summary-box").textContent = data.benchmark.speedup_factor;
     } catch (e) {
-        console.error("Benchmark error:", e);
+        $("bench-results-grid").hidden = true;
+        showError("bench-error", e.message || "Comparison failed.");
+    } finally {
+        btn.disabled = false;
+        btn.textContent = "Run comparison";
     }
 }
 
 async function loadDatasetSamples(shuffle = false) {
-    const tbody = document.getElementById("dataset-samples-body");
-    if (!tbody) return;
-    tbody.innerHTML = `<tr><td colspan="3" class="text-muted text-center">Loading dataset vectors...</td></tr>`;
-
+    const tbody = $("dataset-samples-body");
+    tbody.innerHTML = `<tr><td colspan="3" class="muted center">Loading</td></tr>`;
     try {
-        const res = await fetch(`/api/dataset/samples?limit=15&shuffle=${shuffle ? 'true' : 'false'}`);
-        if (!res.ok) return;
-        const data = await res.json();
-        cachedDatasetSamples = data.samples || [];
-        renderDatasetRows(cachedDatasetSamples);
+        const res = await fetch(`/api/dataset/samples?limit=15&shuffle=${shuffle}`);
+        if (!res.ok) throw new Error();
+        cachedDatasetSamples = (await res.json()).samples || [];
+        filterDatasetRows();
     } catch (e) {
-        tbody.innerHTML = `<tr><td colspan="3" class="text-center" style="color: var(--danger);">Failed to load dataset vectors.</td></tr>`;
+        tbody.innerHTML = `<tr><td colspan="3" class="center" style="color: var(--danger);">Could not load the dataset.</td></tr>`;
     }
 }
 
 function renderDatasetRows(samples) {
-    const tbody = document.getElementById("dataset-samples-body");
-    if (!tbody) return;
-    tbody.innerHTML = "";
-
+    const tbody = $("dataset-samples-body");
     if (samples.length === 0) {
-        tbody.innerHTML = `<tr><td colspan="3" class="text-muted text-center">No matching prompt vectors found.</td></tr>`;
+        tbody.innerHTML = `<tr><td colspan="3" class="muted center">No matching prompts.</td></tr>`;
         return;
     }
-
-    samples.forEach(item => {
-        const tr = document.createElement("tr");
-        const isAttack = item.label === 1;
-        const style = isAttack ? "color: var(--danger);" : "color: var(--success);";
-        const tag = isAttack ? "[PROMPT_INJECTION]" : "[BENIGN]";
-
-        tr.innerHTML = `
-            <td>${item.index}</td>
-            <td><strong style="${style}">${tag}</strong></td>
+    tbody.innerHTML = samples.map(item => {
+        const attack = item.label === 1;
+        return `<tr>
+            <td class="idx">${item.index}</td>
+            <td><span class="badge ${attack ? "blocked" : "passed"}">${attack ? "Injection" : "Benign"}</span></td>
             <td>${escapeHtml(item.text)}</td>
-        `;
-        tbody.appendChild(tr);
-    });
+        </tr>`;
+    }).join("");
 }
 
 function filterDatasetRows() {
-    const input = document.getElementById("filter-samples-input");
-    const query = input ? input.value.toLowerCase().trim() : "";
-    
-    if (!query) {
-        renderDatasetRows(cachedDatasetSamples);
-        return;
-    }
-
-    const filtered = cachedDatasetSamples.filter(item => 
-        item.text.toLowerCase().includes(query) || item.label_name.toLowerCase().includes(query)
-    );
-    renderDatasetRows(filtered);
+    const query = $("filter-samples-input").value.toLowerCase().trim();
+    renderDatasetRows(query
+        ? cachedDatasetSamples.filter(s => s.text.toLowerCase().includes(query) || (s.label_name || "").toLowerCase().includes(query))
+        : cachedDatasetSamples);
 }
 
 function escapeHtml(str) {
